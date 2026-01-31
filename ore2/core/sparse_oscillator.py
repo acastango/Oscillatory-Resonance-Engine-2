@@ -82,6 +82,9 @@ class SparseOscillatorLayer:
         )
         np.fill_diagonal(self.internal_weights, 0.0)
 
+        # Step counter
+        self._step_count: int = 0
+
     # ── Properties ──────────────────────────────────────────────────────────
 
     @property
@@ -147,6 +150,8 @@ class SparseOscillatorLayer:
         Only active oscillators participate in Kuramoto coupling.
         Dormant oscillators drift at their natural frequency.
         """
+        self._step_count += 1
+
         if self.n_active > 0:
             active_idx = np.where(self.active_mask)[0]
             active_phases = self.phases[active_idx]
