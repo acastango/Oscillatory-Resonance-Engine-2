@@ -61,7 +61,42 @@ These briefings are designed for handoff to Claude Code for implementation. Each
 | `005_development.md` | DevelopmentTracker | 5 | ~200 | numpy, stdlib |
 | `006_entity.md` | DevelopmentalEntity | 6 | ~400 | all above |
 
-**Total estimated:** ~1,600 lines of implementation
+**Total Phase 1 (Core):** ~1,600 lines
+
+### Phase 2: Integration Layer
+
+| File | Component | Priority | Est. Lines | Dependencies |
+|------|-----------|----------|------------|--------------|
+| `007_persistence.md` | EntityPersistence | 7 | ~400 | 006 |
+| `008_semantic_grounding.md` | SemanticGrounding | 8 | ~350 | 001, 002 |
+| `009_claims.md` | ClaimsEngine | 9 | ~450 | 008 |
+| `010_llm_bridge.md` | LLMBridge | 10 | ~500 | 006, 008, 009 |
+
+**Total Phase 2 (Integration):** ~1,700 lines
+
+### Phase 3: Production Layer
+
+| File | Component | Priority | Est. Lines | Dependencies |
+|------|-----------|----------|------------|--------------|
+| `011_api.md` | EntityAPI | 11 | ~600 | 006, 010 |
+| `012_multi_agent.md` | MultiAgentNetwork | 12 | ~650 | 006, 009 |
+| `013_dashboard.md` | Dashboard | 13 | ~400 | 011 (WebSocket) |
+
+**Total Phase 3 (Production):** ~1,650 lines
+
+### Phase 4: Autonomy & Intelligence
+
+| File | Component | Priority | Est. Lines | Dependencies |
+|------|-----------|----------|------------|--------------|
+| `014_active_inference.md` | ActiveInferenceEngine | 14 | ~650 | 002, 003 |
+| `015_attention.md` | SalienceNetwork | 15 | ~550 | 002 |
+| `016_plasticity.md` | HebbianPlasticity | 16 | ~500 | 002, 015 |
+| `017_goals.md` | GoalSystem | 17 | ~550 | 002 |
+| `018_world_model.md` | WorldModel | 18 | ~600 | 002, 008 |
+
+**Total Phase 4 (Autonomy):** ~2,850 lines
+
+**Grand Total:** ~7,800 lines of implementation
 
 ---
 
