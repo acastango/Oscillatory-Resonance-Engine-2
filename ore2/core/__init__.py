@@ -1,0 +1,1 @@
+from .sparse_oscillator import SparseOscillatorConfig, SparseOscillatorLayer
