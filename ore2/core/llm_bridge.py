@@ -131,18 +131,24 @@ class LLMBridge:
         entity: DevelopmentalEntity,
         llm_client: LLMClient,
         config: Optional[LLMBridgeConfig] = None,
+        embedder: Optional[Any] = None,
     ):
         self.entity = entity
         self.llm_client = llm_client
         self.config = config or LLMBridgeConfig()
 
-        # Initialize grounding with LLM's embedder
+        # Resolve embedder: explicit param > llm_client.embed > None
+        resolved_embedder = embedder
+        if resolved_embedder is None:
+            resolved_embedder = self._probe_embedder(llm_client)
+
+        # Initialize grounding with embedder (may be None)
         self.grounding = SemanticGrounding(
             SemanticGroundingConfig(
                 fast_oscillators=entity.substrate.fast.n,
                 slow_oscillators=entity.substrate.slow.n,
             ),
-            embedder=llm_client.embed,
+            embedder=resolved_embedder,
         )
 
         # Initialize claims engine
@@ -150,6 +156,18 @@ class LLMBridge:
 
         # Conversation history
         self._conversation_history: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def _probe_embedder(llm_client: LLMClient) -> Optional[Any]:
+        """
+        Test if llm_client.embed works. If it raises NotImplementedError,
+        return None so the bridge operates in completion-only mode.
+        """
+        try:
+            llm_client.embed("test")
+            return llm_client.embed
+        except NotImplementedError:
+            return None
 
     # ── Main Interaction ──────────────────────────────────────────────────────
 
@@ -168,29 +186,31 @@ class LLMBridge:
         # Estimate significance from novelty and coherence impact
         significance = self._estimate_significance(text)
 
-        # Stimulate substrate
-        self.grounding.stimulate_from_text(
-            self.entity.substrate,
-            text,
-            strength=0.3 + significance * 0.4,
-        )
+        # Stimulate substrate (requires embedder for text -> phases)
+        if self.grounding.embedder is not None:
+            self.grounding.stimulate_from_text(
+                self.entity.substrate,
+                text,
+                strength=0.3 + significance * 0.4,
+            )
 
         # Retrieve related memories
         memories = self.retrieve_relevant_memories(
             text, self.config.memory_retrieval_k
         )
 
-        # Stimulate from memories too (recall)
-        for mem in memories:
-            if 'content' in mem.content:
-                mem_phases = self.grounding.text_to_phases(
-                    str(mem.content['content'])
-                )
-                self.entity.substrate.stimulate_concept(
-                    mem_phases.fast,
-                    mem_phases.slow,
-                    strength=0.2 * mem.coherence_at_creation,
-                )
+        # Stimulate from memories too (recall, requires embedder)
+        if self.grounding.embedder is not None:
+            for mem in memories:
+                if 'content' in mem.content:
+                    mem_phases = self.grounding.text_to_phases(
+                        str(mem.content['content'])
+                    )
+                    self.entity.substrate.stimulate_concept(
+                        mem_phases.fast,
+                        mem_phases.slow,
+                        strength=0.2 * mem.coherence_at_creation,
+                    )
 
         # Check claim activation
         activated_claims = self._check_claim_triggers(text)

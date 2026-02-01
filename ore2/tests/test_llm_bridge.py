@@ -646,3 +646,83 @@ def test_bridge_significance_decreases_with_repetition():
 
     # Second time should be less novel
     assert r2.significance <= r1.significance
+
+
+# ── No-Embedder (completion-only) Tests ──────────────────────────────────────
+
+
+class NoEmbedClient(LLMClient):
+    """Client that only supports completions, not embeddings (like Claude)."""
+
+    def complete(self, prompt, system_prompt="", temperature=0.7, max_tokens=1024):
+        return f"Response to: {prompt[:50]}"
+
+    def embed(self, text):
+        raise NotImplementedError("No embeddings available")
+
+
+def test_bridge_no_embedder_creation():
+    """Bridge should initialize with a client that has no embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    assert bridge.grounding.embedder is None
+
+
+def test_bridge_no_embedder_conversation_turn():
+    """Full conversation should work without embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    response = bridge.conversation_turn("Hello!")
+    assert len(response) > 0
+    assert len(bridge._conversation_history) == 2
+
+
+def test_bridge_no_embedder_process_input():
+    """process_input should work without embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    result = bridge.process_input("Test input")
+    assert isinstance(result, ProcessResult)
+    assert result.significance > 0
+
+
+def test_bridge_no_embedder_system_prompt():
+    """System prompt should still be built without embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    prompt = bridge.build_system_prompt()
+    assert "NoEmbed" in prompt
+    assert "Coherence" in prompt
+
+
+def test_bridge_no_embedder_generation_params():
+    """Generation params should still work without embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    params = bridge.get_generation_params()
+    assert 0.1 <= params.temperature <= 1.5
+    assert params.max_tokens >= 64
+
+
+def test_bridge_explicit_embedder_overrides():
+    """Explicit embedder param should override client's embed."""
+    entity = create_entity("Override")
+    client = NoEmbedClient()
+
+    # Pass a working embedder explicitly
+    mock_client = MockLLMClient()
+    bridge = LLMBridge(entity, client, embedder=mock_client.embed)
+
+    assert bridge.grounding.embedder is not None
+    emb = bridge.grounding.embedder("test")
+    assert emb.shape == (1536,)
