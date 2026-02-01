@@ -281,6 +281,22 @@ class MultiScaleSubstrate:
         self.fast.stimulate_by_similarity(fast_pattern, strength)
         self.slow.stimulate_by_similarity(slow_pattern, strength)
 
+    def sustain_activation(
+        self,
+        fast_strength: float = 0.3,
+        slow_strength: float = 0.15,
+    ) -> None:
+        """
+        Sustain activation of currently active oscillators.
+
+        Unlike stimulate_concept, this doesn't use phase similarity —
+        it just boosts already-active oscillators to counteract decay.
+        Fast gets a larger boost because it decays faster (nesting ratio
+        means fast runs multiple substeps per slow step).
+        """
+        self.fast.sustain_activation(fast_strength)
+        self.slow.sustain_activation(slow_strength)
+
     def get_state(self) -> dict:
         """Full substrate state."""
         return {

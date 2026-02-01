@@ -143,6 +143,20 @@ class SparseOscillatorLayer:
         np.clip(self.activation_potentials, 0, 1, out=self.activation_potentials)
         self._update_active_mask()
 
+    def sustain_activation(self, strength: float = 0.2) -> None:
+        """
+        Boost currently active oscillators to counteract decay.
+
+        Unlike stimulate_by_similarity, this does NOT change which
+        oscillators are active — it just prevents existing ones from
+        decaying below threshold. This keeps the active set stable,
+        which stabilizes coherence measurements.
+        """
+        if self.n_active > 0:
+            active_idx = np.where(self.active_mask)[0]
+            self.activation_potentials[active_idx] += strength
+            np.clip(self.activation_potentials, 0, 1, out=self.activation_potentials)
+
     def step(self, dt: float, external_input: Optional[np.ndarray] = None) -> None:
         """
         Advance dynamics by one timestep.

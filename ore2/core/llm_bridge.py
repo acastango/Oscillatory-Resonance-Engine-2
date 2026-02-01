@@ -176,9 +176,9 @@ class LLMBridge:
         Process input text through ORE.
 
         1. Estimate significance
-        2. Stimulate substrate
-        3. Retrieve related memories
-        4. Update entity state
+        2. Stimulate substrate from text and memories
+        3. Apply claims to shape dynamics
+        4. Record as experience (which runs substrate ticks internally)
         """
         coherence_before = self.entity.substrate.global_coherence
         valence_before = self.entity.body.valence
@@ -191,7 +191,7 @@ class LLMBridge:
             self.grounding.stimulate_from_text(
                 self.entity.substrate,
                 text,
-                strength=0.3 + significance * 0.4,
+                strength=0.6 + significance * 0.4,
             )
 
         # Retrieve related memories
@@ -209,25 +209,40 @@ class LLMBridge:
                     self.entity.substrate.stimulate_concept(
                         mem_phases.fast,
                         mem_phases.slow,
-                        strength=0.2 * mem.coherence_at_creation,
+                        strength=0.3 * mem.coherence_at_creation,
                     )
 
         # Check claim activation
         activated_claims = self._check_claim_triggers(text)
 
-        # Run substrate dynamics
-        for _ in range(self.config.ticks_per_turn):
-            self.entity.tick()
-
-        # Apply active claims
+        # Apply active claims BEFORE dynamics so they shape the trajectory
         self.claims.apply_to_substrate(self.entity.substrate)
 
-        # Record as experience
+        # Record as experience — skip_stimulation and run_ticks=False when
+        # we have grounding, because:
+        # 1. Hash-based patterns would fight the grounded ones
+        # 2. The internal tick loop would decay activation without re-stim
+        # The bridge handles its own tick loop with sustained stimulation.
+        has_grounding = self.grounding.embedder is not None
         self.entity.process_experience(
             text,
             experience_type="conversation_input",
             significance=significance,
+            skip_stimulation=has_grounding,
+            run_ticks=not has_grounding,
         )
+
+        # Bridge-controlled tick loop: sustain activation every tick to
+        # counteract the 5x fast decay from nesting ratio, plus periodic
+        # content-based stimulation to reinforce phase coherence.
+        if has_grounding:
+            for i in range(self.config.ticks_per_turn):
+                self.entity.substrate.sustain_activation()
+                if i % 3 == 0:
+                    self.grounding.stimulate_from_text(
+                        self.entity.substrate, text, strength=0.2,
+                    )
+                self.entity.tick()
 
         coherence_after = self.entity.substrate.global_coherence
         valence_after = self.entity.body.valence
@@ -274,9 +289,16 @@ class LLMBridge:
             messages=messages if messages else None,
         )
 
-        # Post-generation ticks
+        # Post-generation ticks with sustained activation
         if self.config.auto_tick_after_response:
-            for _ in range(self.config.ticks_per_turn):
+            for i in range(self.config.ticks_per_turn):
+                if self.grounding.embedder is not None:
+                    self.entity.substrate.sustain_activation()
+                    if i % 3 == 0:
+                        self.grounding.stimulate_from_text(
+                            self.entity.substrate, prompt[:200],
+                            strength=0.15,
+                        )
                 self.entity.tick()
 
         return GenerationResult(
@@ -337,18 +359,36 @@ class LLMBridge:
             self.grounding.stimulate_from_text(
                 self.entity.substrate,
                 gen_result.response[:500],  # Truncate for efficiency
-                strength=0.2,
+                strength=0.5,
             )
 
         # Estimate response significance
         resp_significance = self._estimate_significance(gen_result.response)
 
-        # Store response as experience
+        # Store response as experience — skip hash-based stimulation and
+        # internal ticks when we have grounding, for the same reasons as
+        # in process_input: hash patterns fight grounded ones and the
+        # internal tick loop decays activation without re-stimulation.
+        has_grounding = self.grounding.embedder is not None
         self.entity.process_experience(
             gen_result.response,
             experience_type="conversation_output",
             significance=resp_significance,
+            skip_stimulation=has_grounding,
+            run_ticks=not has_grounding,
         )
+
+        # Sustain activation after response processing
+        if has_grounding:
+            for i in range(self.config.ticks_per_turn):
+                self.entity.substrate.sustain_activation()
+                if i % 3 == 0:
+                    self.grounding.stimulate_from_text(
+                        self.entity.substrate,
+                        gen_result.response[:200],
+                        strength=0.15,
+                    )
+                self.entity.tick()
 
         # Store high-significance responses as insights
         if resp_significance > 0.7:

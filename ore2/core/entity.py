@@ -167,6 +167,8 @@ class DevelopmentalEntity:
         content: str,
         experience_type: str = "general",
         significance: float = 0.5,
+        skip_stimulation: bool = False,
+        run_ticks: bool = True,
     ) -> dict:
         """
         Process an experience (e.g., from conversation).
@@ -175,6 +177,13 @@ class DevelopmentalEntity:
             content: Text content of the experience.
             experience_type: Type for critical period matching.
             significance: 0-1, how important is this.
+            skip_stimulation: If True, skip hash-based substrate stimulation.
+                Use this when an external system (e.g., LLMBridge with
+                SemanticGrounding) has already stimulated the substrate
+                with properly grounded phase patterns.
+            run_ticks: If False, skip the internal 10-tick dynamics loop.
+                Use this when the caller will run its own tick loop with
+                sustained stimulation to maintain activation.
 
         Returns:
             Dict with processing results.
@@ -190,39 +199,40 @@ class DevelopmentalEntity:
         # Development processing (may trigger growth/transition)
         dev_result = self.development.process_experience(experience, significance)
 
-        # Generate stimulation patterns from content
-        # Use hash to create deterministic pseudo-random patterns
-        content_bytes = content.encode("utf-8")
-        content_hash = hashlib.sha256(content_bytes).digest()
+        if not skip_stimulation:
+            # Generate stimulation patterns from content
+            # Use hash to create deterministic pseudo-random patterns
+            content_bytes = content.encode("utf-8")
+            content_hash = hashlib.sha256(content_bytes).digest()
 
-        # Extend hash to cover all oscillators
-        n_fast = self.substrate.fast.n
-        n_slow = self.substrate.slow.n
-        max_n = max(n_fast, n_slow)
-        extended_hash = (content_hash * ((max_n // len(content_hash)) + 2))[
-            : max_n * 2
-        ]
+            # Extend hash to cover all oscillators
+            n_fast = self.substrate.fast.n
+            n_slow = self.substrate.slow.n
+            max_n = max(n_fast, n_slow)
+            extended_hash = (content_hash * ((max_n // len(content_hash)) + 2))[
+                : max_n * 2
+            ]
 
-        fast_pattern = np.array(
-            [b / 255 * 2 * np.pi for b in extended_hash[:n_fast]]
-        )
-        slow_pattern = np.array(
-            [b / 255 * 2 * np.pi for b in extended_hash[:n_slow]]
-        )
+            fast_pattern = np.array(
+                [b / 255 * 2 * np.pi for b in extended_hash[:n_fast]]
+            )
+            slow_pattern = np.array(
+                [b / 255 * 2 * np.pi for b in extended_hash[:n_slow]]
+            )
 
-        # Stimulation strength modulated by:
-        # - Base strength
-        # - Significance
-        # - Learning multiplier from critical periods
-        base_strength = 0.3
-        stim_strength = (
-            base_strength
-            * (0.5 + significance * 0.5)  # 0.5-1.0 based on significance
-            * dev_result["learning_multiplier"]
-        )
+            # Stimulation strength modulated by:
+            # - Base strength
+            # - Significance
+            # - Learning multiplier from critical periods
+            base_strength = 0.3
+            stim_strength = (
+                base_strength
+                * (0.5 + significance * 0.5)  # 0.5-1.0 based on significance
+                * dev_result["learning_multiplier"]
+            )
 
-        # Stimulate substrate
-        self.substrate.stimulate_concept(fast_pattern, slow_pattern, stim_strength)
+            # Stimulate substrate
+            self.substrate.stimulate_concept(fast_pattern, slow_pattern, stim_strength)
 
         # Add to memory
         # Queue for consolidation if not significant enough
@@ -235,8 +245,9 @@ class DevelopmentalEntity:
         )
 
         # Run several ticks to process the experience
-        for _ in range(10):
-            self.tick()
+        if run_ticks:
+            for _ in range(10):
+                self.tick()
 
         # Handle growth if triggered
         if dev_result["growth_triggered"]:
