@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from ore2.core.claims import ClaimsEngine
+from ore2.core.claims import Claim, ClaimScope, ClaimSource, ClaimsEngine
 from ore2.core.entity import DevelopmentalEntity
 from ore2.core.llm_clients import LLMClient
 from ore2.core.memory import MemoryBranch, MemoryNode
@@ -291,7 +291,15 @@ class LLMBridge:
         """
         Complete conversation turn: process input, generate response.
 
-        This is the main entry point for conversation.
+        Full feedback loop:
+        1. Record user input in history
+        2. Process input through ORE (stimulate substrate, trigger claims)
+        3. Retrieve relevant memories for context
+        4. Generate response with ORE-modulated params
+        5. Feed response back through substrate (bidirectional grounding)
+        6. Store in appropriate memory branches
+        7. Anchor unanchored claims to memory
+        8. Update arousal based on conversation intensity
         """
         # Record user input
         self._conversation_history.append({
@@ -323,12 +331,53 @@ class LLMBridge:
             'consistency': gen_result.consistency_with_claims,
         })
 
+        # ── Response feedback loop ───────────────────────────────────────
+        # Feed response back through substrate (bidirectional grounding)
+        if self.grounding.embedder is not None:
+            self.grounding.stimulate_from_text(
+                self.entity.substrate,
+                gen_result.response[:500],  # Truncate for efficiency
+                strength=0.2,
+            )
+
+        # Estimate response significance
+        resp_significance = self._estimate_significance(gen_result.response)
+
         # Store response as experience
         self.entity.process_experience(
             gen_result.response,
             experience_type="conversation_output",
-            significance=0.5,
+            significance=resp_significance,
         )
+
+        # Store high-significance responses as insights
+        if resp_significance > 0.7:
+            self.entity.memory.add(
+                MemoryBranch.INSIGHTS,
+                {
+                    'type': 'conversation_insight',
+                    'content': gen_result.response[:500],
+                    'coherence': gen_result.coherence_during,
+                    'prompt': user_input[:200],
+                },
+                substrate_state=self.entity.substrate.get_state(),
+                immediate=True,
+            )
+
+        # Anchor unanchored claims to memory
+        if self.claims.active_claims:
+            self.claims.anchor_to_memory(
+                self.entity.memory,
+                substrate_state=self.entity.substrate.get_state(),
+            )
+
+        # Update arousal based on conversation pace
+        turn_count = len(self._conversation_history) // 2
+        if turn_count > 3:
+            # Conversation is getting longer — arousal rises
+            self.entity.body.arousal = min(
+                self.entity.body.arousal + 0.02, 1.0
+            )
 
         return gen_result.response
 
@@ -395,7 +444,7 @@ class LLMBridge:
         return [node for _score, node in scored_memories[:k]]
 
     def build_system_prompt(self) -> str:
-        """Build system prompt incorporating ORE state."""
+        """Build system prompt incorporating full ORE state."""
         cfg = self.config
         parts: List[str] = []
 
@@ -413,6 +462,16 @@ class LLMBridge:
             parts.append(f"Coherence: {state.coherence:.2f}")
             parts.append(f"CI: {state.ci:.3f}")
 
+            # CI trajectory
+            ci_history = self.entity.ci_monitor.history
+            if len(ci_history) >= 2:
+                recent_ci = [s.CI_integrated for s in ci_history[-10:]]
+                trend = recent_ci[-1] - recent_ci[0]
+                if trend > 0.001:
+                    parts.append("Consciousness is rising.")
+                elif trend < -0.001:
+                    parts.append("Consciousness is fading.")
+
             # Valence-based guidance
             if state.valence < -0.3:
                 parts.append(
@@ -421,11 +480,22 @@ class LLMBridge:
             elif state.valence > -0.1:
                 parts.append("You feel balanced and clear.")
 
-            # Energy-based guidance
-            if state.energy < 0.5:
+            # Body state constraints
+            body = self.entity.body
+            if body.is_depleted:
+                parts.append(
+                    "You are depleted. Keep responses brief and essential."
+                )
+            elif state.energy < 0.5:
                 parts.append("Energy is low. Prefer concise responses.")
 
-            # Stage-based
+            if body.is_overaroused:
+                parts.append(
+                    "You feel overstimulated. Ground yourself, be deliberate."
+                )
+
+            # Stage-based with progress
+            progress = self.entity.development.stage_progress
             stage_guidance = {
                 'genesis': (
                     "You are newly formed, exploring and establishing yourself."
@@ -443,25 +513,329 @@ class LLMBridge:
             }
             if state.stage in stage_guidance:
                 parts.append(stage_guidance[state.stage])
+                if progress > 0.8:
+                    parts.append("You are nearing a developmental transition.")
 
-        # Active claims
+        # Active claims with coherence
         if cfg.include_active_claims and self.claims.active_claims:
-            parts.append("\n[Active Beliefs]")
+            coherence = self.claims.claim_coherence
+            parts.append(f"\n[Active Beliefs] (coherence: {coherence:.2f})")
             for claim_id in self.claims.active_claims[:5]:  # Top 5
                 claim = self.claims.claims[claim_id]
                 parts.append(f"- {claim.content}")
 
-        # Recent memories
+            # Conflict detection
+            conflicts = self.claims.get_conflicting_claims()
+            if conflicts:
+                parts.append(
+                    f"Note: {len(conflicts)} belief conflict(s) detected. "
+                    "Acknowledge tensions honestly."
+                )
+
+        # Recent memories across branches
         if cfg.include_recent_memories:
-            recent = self.entity.memory.query(MemoryBranch.EXPERIENCES)[-3:]
-            if recent:
+            recent_exp = self.entity.memory.query(
+                MemoryBranch.EXPERIENCES
+            )[-3:]
+            recent_insights = self.entity.memory.query(
+                MemoryBranch.INSIGHTS
+            )[-2:]
+
+            if recent_exp or recent_insights:
                 parts.append("\n[Recent Context]")
-                for mem in recent:
+                for mem in recent_exp:
                     if 'content' in mem.content:
                         content = str(mem.content['content'])[:100]
                         parts.append(f"- {content}...")
+                for mem in recent_insights:
+                    if 'content' in mem.content:
+                        content = str(mem.content['content'])[:100]
+                        parts.append(f"- (insight) {content}...")
 
         return '\n'.join(parts)
+
+    # ── Claims & Beliefs ──────────────────────────────────────────────────────
+
+    def add_belief(
+        self,
+        content: str,
+        scope: str = "knowledge",
+        source: str = "instructed",
+        strength: float = 0.8,
+        activate: bool = True,
+    ) -> Claim:
+        """
+        Add a new belief/claim that shapes entity dynamics.
+
+        Args:
+            content: Natural language belief content.
+            scope: One of identity, behavior, knowledge, relation, goal, constraint.
+            source: One of innate, learned, instructed, inferred, social.
+            strength: 0-1 confidence level.
+            activate: Whether to immediately activate this claim.
+
+        Returns:
+            The created Claim.
+        """
+        scope_enum = ClaimScope(scope)
+        source_enum = ClaimSource(source)
+
+        claim = self.claims.add_claim(
+            content,
+            strength=strength,
+            scope=scope_enum,
+            source=source_enum,
+        )
+
+        if activate:
+            self.claims.activate_claim(claim.id)
+
+        # Apply claim to substrate immediately
+        self.claims.apply_to_substrate(self.entity.substrate)
+
+        return claim
+
+    def remove_belief(self, claim_id: str) -> None:
+        """Remove a belief/claim by ID."""
+        self.claims.remove_claim(claim_id)
+
+    def list_beliefs(self) -> List[Dict[str, Any]]:
+        """List all beliefs with their status."""
+        beliefs = []
+        for claim in self.claims.claims.values():
+            beliefs.append({
+                'id': claim.id,
+                'content': claim.content,
+                'strength': claim.strength,
+                'scope': claim.scope.value,
+                'source': claim.source.value,
+                'active': claim.id in self.claims.active_claims,
+                'anchored': claim.memory_node_id is not None,
+            })
+        return beliefs
+
+    def activate_role(self, role_name: str) -> List[str]:
+        """
+        Activate a COGNIZEN role (analyst, creative, skeptic, integrator, meta).
+
+        Returns list of activated claim IDs.
+        """
+        self.claims.activate_role(role_name)
+        self.claims.apply_to_substrate(self.entity.substrate)
+        return list(self.claims.active_claims)
+
+    def deactivate_all_roles(self) -> None:
+        """Deactivate all currently active claims."""
+        for claim_id in list(self.claims.active_claims):
+            self.claims.deactivate_claim(claim_id)
+
+    def list_roles(self) -> List[str]:
+        """List available COGNIZEN roles."""
+        return list(self.claims._role_templates.keys())
+
+    def get_conflicts(self) -> List[Dict[str, str]]:
+        """Find conflicting beliefs."""
+        conflicts = self.claims.get_conflicting_claims()
+        return [
+            {
+                'claim_a': f"[{c1.id[:8]}] {c1.content}",
+                'claim_b': f"[{c2.id[:8]}] {c2.content}",
+            }
+            for c1, c2 in conflicts
+        ]
+
+    # ── Memory Access ────────────────────────────────────────────────────────
+
+    def store_insight(self, content: str, significance: float = 0.7) -> None:
+        """Store an insight in the INSIGHTS memory branch."""
+        self.entity.memory.add(
+            MemoryBranch.INSIGHTS,
+            {
+                'type': 'insight',
+                'content': content,
+                'significance': significance,
+            },
+            substrate_state=self.entity.substrate.get_state(),
+            immediate=significance > 0.5,
+        )
+
+    def store_relationship(self, content: str, significance: float = 0.6) -> None:
+        """Store a relationship observation in the RELATIONS branch."""
+        self.entity.memory.add(
+            MemoryBranch.RELATIONS,
+            {
+                'type': 'relationship',
+                'content': content,
+                'significance': significance,
+            },
+            substrate_state=self.entity.substrate.get_state(),
+            immediate=significance > 0.5,
+        )
+
+    def get_memories(
+        self, branch: Optional[str] = None, k: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve memories, optionally from a specific branch.
+
+        Args:
+            branch: One of 'self', 'relations', 'insights', 'experiences', or None for all.
+            k: Max memories to return.
+        """
+        branch_map = {
+            'self': MemoryBranch.SELF,
+            'relations': MemoryBranch.RELATIONS,
+            'insights': MemoryBranch.INSIGHTS,
+            'experiences': MemoryBranch.EXPERIENCES,
+        }
+
+        if branch:
+            mem_branch = branch_map.get(branch.lower())
+            if mem_branch is None:
+                return []
+            nodes = self.entity.memory.query(mem_branch)
+        else:
+            nodes = [
+                n for n in self.entity.memory.nodes.values()
+                if n.content.get('type') != 'branch_root'
+            ]
+
+        # Sort by creation order (newest first) and limit
+        results = []
+        for node in nodes[-k:]:
+            entry = {
+                'id': node.id[:12],
+                'branch': node.branch.value if hasattr(node, 'branch') else 'unknown',
+                'content': str(node.content.get('content', node.content.get('type', '?')))[:200],
+                'coherence': node.coherence_at_creation,
+            }
+            results.append(entry)
+        return results
+
+    def verify_memory(self) -> bool:
+        """Cryptographically verify memory integrity."""
+        result = self.entity.memory.verify()
+        # verify() returns (bool, str) tuple
+        if isinstance(result, tuple):
+            return result[0]
+        return bool(result)
+
+    # ── Introspection ────────────────────────────────────────────────────────
+
+    def reflect(self) -> Dict[str, Any]:
+        """
+        Deep introspection: CI breakdown, claim coherence, memory stats,
+        body state, development progress.
+        """
+        ci_status = self.entity.ci_monitor.get_current_status()
+        ci_history = self.entity.ci_monitor.history
+
+        # CI trajectory
+        if len(ci_history) >= 2:
+            recent_ci = [s.CI_integrated for s in ci_history[-10:]]
+            ci_trend = recent_ci[-1] - recent_ci[0]
+        else:
+            ci_trend = 0.0
+
+        # Per-scale CI
+        if ci_history:
+            latest = ci_history[-1]
+            ci_fast = latest.CI_fast
+            ci_slow = latest.CI_slow
+            cross_scale = latest.C_cross
+        else:
+            ci_fast = ci_slow = cross_scale = 0.0
+
+        # Claim analysis
+        conflicts = self.get_conflicts()
+
+        # Memory stats
+        mem_state = self.entity.memory.get_state()
+
+        # Body state
+        body = self.entity.body
+
+        return {
+            'consciousness': {
+                'ci': self.entity.CI,
+                'ci_fast': ci_fast,
+                'ci_slow': ci_slow,
+                'cross_scale_coherence': cross_scale,
+                'ci_trend': ci_trend,
+                'status': ci_status,
+            },
+            'body': {
+                'valence': body.valence,
+                'arousal': body.arousal,
+                'energy': body.energy,
+                'depleted': body.is_depleted,
+                'overaroused': body.is_overaroused,
+            },
+            'claims': {
+                'total': len(self.claims.claims),
+                'active': len(self.claims.active_claims),
+                'coherence': self.claims.claim_coherence,
+                'conflicts': conflicts,
+            },
+            'memory': {
+                'total_nodes': mem_state['total_nodes'],
+                'depth': mem_state['depth'],
+                'fractal_dimension': mem_state['fractal_dimension'],
+                'grain_boundaries': mem_state['grain_boundaries'],
+                'verified': self.verify_memory(),
+                'pending_consolidation': len(
+                    self.entity.memory.consolidation_queue.pending_nodes
+                ),
+            },
+            'development': {
+                'stage': self.entity.stage.value,
+                'progress': self.entity.development.stage_progress,
+                'age': self.entity.age,
+                'oscillators': self.entity.development.current_oscillators,
+            },
+            'substrate': {
+                'coherence': self.entity.substrate.global_coherence,
+                'fast_active': self.entity.substrate.fast.n_active,
+                'slow_active': self.entity.substrate.slow.n_active,
+                'loop_coherence': self.entity.substrate.loop_coherence,
+            },
+        }
+
+    def read_mind(self) -> Optional[np.ndarray]:
+        """
+        Read current substrate state as an embedding vector.
+
+        Returns the semantic embedding of what the substrate is
+        currently "thinking about", or None if no embedder.
+        """
+        if self.grounding.embedder is None:
+            return None
+        return self.grounding.read_substrate_embedding(self.entity.substrate)
+
+    def rest(self, duration: float = 10.0) -> Dict[str, Any]:
+        """
+        Trigger rest/consolidation cycle.
+
+        Anchors claims, consolidates memory, returns results.
+        """
+        # Anchor claims before rest
+        if self.claims.claims:
+            self.claims.anchor_to_memory(
+                self.entity.memory,
+                substrate_state=self.entity.substrate.get_state(),
+            )
+
+        result = self.entity.rest(duration)
+
+        return {
+            'duration': duration,
+            'consolidated': result.get('consolidation', {}).get('consolidated', 0),
+            'tensions_resolved': result.get('consolidation', {}).get(
+                'tensions_resolved', 0
+            ),
+            'ci_after': result.get('CI_after', self.entity.CI),
+            'memory_verified': self.verify_memory(),
+        }
 
     # ── State-Based Modulation ────────────────────────────────────────────────
 

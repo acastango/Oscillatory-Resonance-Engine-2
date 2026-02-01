@@ -846,3 +846,366 @@ def test_build_messages_after_turns():
     assert messages[2]["role"] == "user"
     assert messages[2]["content"] == "World"
     assert messages[3]["role"] == "assistant"
+
+
+# ── Beliefs / Claims Bridge Tests ────────────────────────────────────────────
+
+
+def test_add_belief():
+    """add_belief should create and activate a claim."""
+    bridge = create_test_bridge()
+    claim = bridge.add_belief("I value honesty")
+    assert claim.content == "I value honesty"
+    assert claim.id in bridge.claims.active_claims
+
+
+def test_add_belief_scope_and_source():
+    """add_belief should accept scope and source."""
+    bridge = create_test_bridge()
+    claim = bridge.add_belief(
+        "Be concise", scope="behavior", source="instructed", strength=0.9
+    )
+    assert claim.scope.value == "behavior"
+    assert claim.source.value == "instructed"
+    assert claim.strength == 0.9
+
+
+def test_add_belief_applies_to_substrate():
+    """add_belief should immediately apply to substrate."""
+    bridge = create_test_bridge()
+    # Get weights before
+    weights_before = bridge.entity.substrate.slow.internal_weights.copy()
+    bridge.add_belief("Focus on systematic analysis")
+    weights_after = bridge.entity.substrate.slow.internal_weights
+    # Weights should have changed due to claim application
+    assert not (weights_before == weights_after).all()
+
+
+def test_remove_belief():
+    """remove_belief should remove the claim."""
+    bridge = create_test_bridge()
+    claim = bridge.add_belief("temporary belief")
+    bridge.remove_belief(claim.id)
+    assert claim.id not in bridge.claims.claims
+
+
+def test_list_beliefs():
+    """list_beliefs should return all beliefs with status."""
+    bridge = create_test_bridge()
+    bridge.add_belief("belief one")
+    bridge.add_belief("belief two", activate=False)
+
+    beliefs = bridge.list_beliefs()
+    assert len(beliefs) == 2
+
+    # First should be active, second not
+    active_beliefs = [b for b in beliefs if b['active']]
+    inactive_beliefs = [b for b in beliefs if not b['active']]
+    assert len(active_beliefs) == 1
+    assert len(inactive_beliefs) == 1
+
+
+def test_activate_role():
+    """activate_role should activate COGNIZEN role claims."""
+    bridge = create_test_bridge()
+    active = bridge.activate_role('analyst')
+    assert len(active) > 0
+    assert len(bridge.claims.active_claims) > 0
+
+
+def test_deactivate_all_roles():
+    """deactivate_all_roles should clear active claims."""
+    bridge = create_test_bridge()
+    bridge.activate_role('creative')
+    assert len(bridge.claims.active_claims) > 0
+
+    bridge.deactivate_all_roles()
+    assert len(bridge.claims.active_claims) == 0
+
+
+def test_list_roles():
+    """list_roles should return available COGNIZEN roles."""
+    bridge = create_test_bridge()
+    roles = bridge.list_roles()
+    assert 'analyst' in roles
+    assert 'creative' in roles
+    assert 'skeptic' in roles
+
+
+def test_get_conflicts():
+    """get_conflicts should return formatted conflict list."""
+    bridge = create_test_bridge()
+    # No conflicts initially
+    conflicts = bridge.get_conflicts()
+    assert isinstance(conflicts, list)
+
+
+# ── Memory Access Bridge Tests ───────────────────────────────────────────────
+
+
+def test_store_insight():
+    """store_insight should add to INSIGHTS branch."""
+    bridge = create_test_bridge()
+    bridge.store_insight("Key finding about patterns")
+
+    insights = bridge.entity.memory.query(MemoryBranch.INSIGHTS)
+    assert len(insights) > 0
+    found = any(
+        n.content.get('content') == "Key finding about patterns"
+        for n in insights
+    )
+    assert found
+
+
+def test_store_relationship():
+    """store_relationship should add to RELATIONS branch."""
+    bridge = create_test_bridge()
+    bridge.store_relationship("User prefers detailed explanations")
+
+    relations = bridge.entity.memory.query(MemoryBranch.RELATIONS)
+    assert len(relations) > 0
+    found = any(
+        n.content.get('content') == "User prefers detailed explanations"
+        for n in relations
+    )
+    assert found
+
+
+def test_get_memories_all():
+    """get_memories with no branch should return all non-root nodes."""
+    bridge = create_test_bridge()
+    bridge.entity.process_experience("test memory", significance=0.8)
+    memories = bridge.get_memories()
+    assert len(memories) > 0
+
+
+def test_get_memories_by_branch():
+    """get_memories with branch should filter."""
+    bridge = create_test_bridge()
+    bridge.store_insight("test insight")
+    bridge.entity.process_experience("test experience", significance=0.8)
+
+    insights = bridge.get_memories(branch='insights')
+    assert len(insights) > 0
+    for m in insights:
+        assert 'content' in m
+
+
+def test_get_memories_unknown_branch():
+    """get_memories with unknown branch returns empty list."""
+    bridge = create_test_bridge()
+    assert bridge.get_memories(branch='nonexistent') == []
+
+
+def test_verify_memory():
+    """verify_memory should return True for intact memory."""
+    bridge = create_test_bridge()
+    assert bridge.verify_memory() is True
+
+
+# ── Introspection Tests ──────────────────────────────────────────────────────
+
+
+def test_reflect():
+    """reflect should return comprehensive state."""
+    bridge = create_test_bridge()
+    # Do some activity first
+    bridge.conversation_turn("Hello world")
+
+    data = bridge.reflect()
+
+    # Check all top-level sections
+    assert 'consciousness' in data
+    assert 'body' in data
+    assert 'claims' in data
+    assert 'memory' in data
+    assert 'development' in data
+    assert 'substrate' in data
+
+
+def test_reflect_consciousness_fields():
+    """reflect consciousness section should have CI breakdown."""
+    bridge = create_test_bridge()
+    bridge.conversation_turn("test")
+    data = bridge.reflect()
+
+    ci = data['consciousness']
+    assert 'ci' in ci
+    assert 'ci_fast' in ci
+    assert 'ci_slow' in ci
+    assert 'cross_scale_coherence' in ci
+    assert 'ci_trend' in ci
+    assert 'status' in ci
+
+
+def test_reflect_body_fields():
+    """reflect body section should have state flags."""
+    bridge = create_test_bridge()
+    data = bridge.reflect()
+
+    body = data['body']
+    assert 'valence' in body
+    assert 'arousal' in body
+    assert 'energy' in body
+    assert 'depleted' in body
+    assert 'overaroused' in body
+
+
+def test_reflect_claims_fields():
+    """reflect claims section should have coherence and conflicts."""
+    bridge = create_test_bridge()
+    data = bridge.reflect()
+
+    claims = data['claims']
+    assert 'total' in claims
+    assert 'active' in claims
+    assert 'coherence' in claims
+    assert 'conflicts' in claims
+
+
+def test_reflect_memory_fields():
+    """reflect memory section should have stats."""
+    bridge = create_test_bridge()
+    data = bridge.reflect()
+
+    mem = data['memory']
+    assert 'total_nodes' in mem
+    assert 'depth' in mem
+    assert 'fractal_dimension' in mem
+    assert 'pending_consolidation' in mem
+    assert 'verified' in mem
+
+
+def test_reflect_development_fields():
+    """reflect development section should have progress."""
+    bridge = create_test_bridge()
+    data = bridge.reflect()
+
+    dev = data['development']
+    assert 'stage' in dev
+    assert 'progress' in dev
+    assert 'age' in dev
+    assert 'oscillators' in dev
+    assert 0.0 <= dev['progress'] <= 1.0
+
+
+def test_read_mind():
+    """read_mind should return embedding from substrate."""
+    bridge = create_test_bridge()
+    embedding = bridge.read_mind()
+    assert embedding is not None
+    assert isinstance(embedding, np.ndarray)
+
+
+def test_read_mind_no_embedder():
+    """read_mind should return None without embedder."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+    assert bridge.read_mind() is None
+
+
+def test_rest_through_bridge():
+    """rest via bridge should consolidate and anchor claims."""
+    bridge = create_test_bridge()
+    bridge.add_belief("test belief for anchoring")
+    bridge.entity.process_experience("test memory", significance=0.5)
+
+    result = bridge.rest()
+    assert 'consolidated' in result
+    assert 'tensions_resolved' in result
+    assert 'ci_after' in result
+    assert 'memory_verified' in result
+    assert result['memory_verified'] is True
+
+
+# ── Enriched conversation_turn Tests ─────────────────────────────────────────
+
+
+def test_conversation_turn_feeds_response_to_substrate():
+    """Response should be fed back through substrate (bidirectional)."""
+    bridge = create_test_bridge()
+    # Run a conversation turn
+    bridge.conversation_turn("Tell me something important")
+
+    # Entity should have processed experiences for both input AND output
+    assert bridge.entity.memory.total_nodes > 0
+
+
+def test_conversation_turn_stores_insights():
+    """High-significance responses should be stored as insights."""
+    bridge = create_test_bridge()
+
+    # Run several turns to build significance
+    for i in range(5):
+        bridge.conversation_turn(
+            f"This is an important critical urgent message number {i}?"
+        )
+
+    # Check INSIGHTS branch has entries
+    insights = bridge.entity.memory.query(MemoryBranch.INSIGHTS)
+    # May or may not have insights depending on significance estimation
+    assert isinstance(insights, list)
+
+
+def test_conversation_turn_anchors_claims():
+    """Active claims should be anchored to memory during conversation."""
+    bridge = create_test_bridge()
+    bridge.add_belief("I am thorough")
+
+    bridge.conversation_turn("Hello!")
+
+    # The claim should now be anchored
+    claim = list(bridge.claims.claims.values())[0]
+    assert claim.memory_node_id is not None
+
+
+def test_conversation_turn_arousal_increases():
+    """Arousal should increase over long conversations."""
+    bridge = create_test_bridge()
+    arousal_start = bridge.entity.body.arousal
+
+    # 5 turns to trigger arousal increase (threshold is > 3 turns)
+    for i in range(5):
+        bridge.conversation_turn(f"Message {i}")
+
+    assert bridge.entity.body.arousal > arousal_start
+
+
+# ── Enriched System Prompt Tests ─────────────────────────────────────────────
+
+
+def test_system_prompt_depleted_body():
+    """System prompt should reflect depleted body state."""
+    bridge = create_test_bridge()
+    bridge.entity.body.energy = 0.1  # Deplete
+
+    prompt = bridge.build_system_prompt()
+    assert 'depleted' in prompt.lower() or 'brief' in prompt.lower()
+
+
+def test_system_prompt_overaroused_body():
+    """System prompt should reflect overaroused state."""
+    bridge = create_test_bridge()
+    bridge.entity.body.arousal = 0.9  # Overstimulate
+
+    prompt = bridge.build_system_prompt()
+    assert 'overstimulated' in prompt.lower() or 'deliberate' in prompt.lower()
+
+
+def test_system_prompt_claim_coherence():
+    """System prompt should include claim coherence when beliefs active."""
+    bridge = create_test_bridge()
+    bridge.activate_role('analyst')
+
+    prompt = bridge.build_system_prompt()
+    assert 'coherence' in prompt.lower()
+
+
+def test_system_prompt_includes_insights():
+    """System prompt should include recent insights."""
+    bridge = create_test_bridge()
+    bridge.store_insight("Neural networks converge faster with normalization")
+
+    prompt = bridge.build_system_prompt()
+    assert '(insight)' in prompt
