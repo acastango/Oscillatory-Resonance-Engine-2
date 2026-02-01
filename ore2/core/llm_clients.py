@@ -46,7 +46,7 @@ class ClaudeClient(LLMClient):
     Requires: pip install anthropic
     """
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "claude-3-opus-20240229"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "claude-sonnet-4-20250514"):
         try:
             from anthropic import Anthropic
         except ImportError as exc:

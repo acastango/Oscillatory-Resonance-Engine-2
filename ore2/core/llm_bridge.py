@@ -87,7 +87,7 @@ class CognitiveState:
 class LLMBridgeConfig:
     """Configuration for the LLM bridge."""
     # LLM settings
-    model: str = "claude-3-opus-20240229"
+    model: str = "claude-sonnet-4-20250514"
     base_temperature: float = 0.7
     base_max_tokens: int = 1024
 
