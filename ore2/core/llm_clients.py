@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -31,8 +31,21 @@ class LLMClient(ABC):
         system_prompt: str = "",
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        messages: Optional[List[Dict[str, str]]] = None,
     ) -> str:
-        """Generate completion."""
+        """
+        Generate completion.
+
+        Args:
+            prompt: The current user message.
+            system_prompt: System-level instructions.
+            temperature: Sampling temperature.
+            max_tokens: Maximum tokens in the response.
+            messages: Optional conversation history as a list of
+                {"role": "user"|"assistant", "content": "..."} dicts.
+                When provided, prompt is appended as the final user message.
+                When None, only prompt is sent (single-turn).
+        """
 
     @abstractmethod
     def embed(self, text: str) -> np.ndarray:
@@ -63,13 +76,24 @@ class ClaudeClient(LLMClient):
         system_prompt: str = "",
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        messages: Optional[List[Dict[str, str]]] = None,
     ) -> str:
+        # Build messages list: history + current prompt
+        if messages:
+            api_messages = [
+                {"role": m["role"], "content": m["content"]}
+                for m in messages
+            ]
+            api_messages.append({"role": "user", "content": prompt})
+        else:
+            api_messages = [{"role": "user", "content": prompt}]
+
         response = self.client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
             temperature=temperature,
             system=system_prompt,
-            messages=[{"role": "user", "content": prompt}],
+            messages=api_messages,
         )
         return response.content[0].text
 
@@ -102,25 +126,52 @@ class OllamaClient(LLMClient):
         system_prompt: str = "",
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        messages: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         import requests
 
-        response = requests.post(
-            f"{self.base_url}/api/generate",
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "system": system_prompt,
-                "stream": False,
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": max_tokens,
+        if messages:
+            # Use /api/chat for multi-turn conversations
+            chat_messages = []
+            if system_prompt:
+                chat_messages.append({"role": "system", "content": system_prompt})
+            for m in messages:
+                chat_messages.append({"role": m["role"], "content": m["content"]})
+            chat_messages.append({"role": "user", "content": prompt})
+
+            response = requests.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": chat_messages,
+                    "stream": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                    },
                 },
-            },
-            timeout=120,
-        )
-        response.raise_for_status()
-        return response.json()["response"]
+                timeout=120,
+            )
+            response.raise_for_status()
+            return response.json()["message"]["content"]
+        else:
+            # Single-turn: use /api/generate
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "system": system_prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                    },
+                },
+                timeout=120,
+            )
+            response.raise_for_status()
+            return response.json()["response"]
 
     def embed(self, text: str) -> np.ndarray:
         import requests
@@ -153,6 +204,7 @@ class MockLLMClient(LLMClient):
         system_prompt: str = "",
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        messages: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         self.call_log.append({
             "method": "complete",
@@ -160,10 +212,14 @@ class MockLLMClient(LLMClient):
             "system_prompt": system_prompt,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "messages": messages,
         })
 
-        # Deterministic response based on prompt content
-        seed = int(hashlib.sha256(prompt.encode()).hexdigest()[:8], 16)
+        # Deterministic response based on prompt + conversation context
+        hash_input = prompt
+        if messages:
+            hash_input = '|'.join(m['content'] for m in messages) + '|' + prompt
+        seed = int(hashlib.sha256(hash_input.encode()).hexdigest()[:8], 16)
         word_count = max(5, min(max_tokens // 10, 50))
         rng = np.random.RandomState(seed % (2**31))
 

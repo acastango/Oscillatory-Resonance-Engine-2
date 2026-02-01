@@ -262,12 +262,16 @@ class LLMBridge:
         coherence_during = self.entity.substrate.global_coherence
         consistency = self.claims.measure_consistency(self.entity.substrate)
 
+        # Build conversation history for multi-turn
+        messages = self._build_messages_for_llm()
+
         # Generate
         response = self.llm_client.complete(
             prompt=prompt,
             system_prompt=system_prompt,
             temperature=params.temperature,
             max_tokens=params.max_tokens,
+            messages=messages if messages else None,
         )
 
         # Post-generation ticks
@@ -517,6 +521,24 @@ class LLMBridge:
         )
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _build_messages_for_llm(self) -> List[Dict[str, str]]:
+        """
+        Build conversation messages for the LLM from history.
+
+        Returns a list of {"role": ..., "content": ...} dicts representing
+        prior completed turns. The current (trailing) user message is excluded
+        because it's passed separately as the `prompt` argument to complete().
+        """
+        history = self._conversation_history
+        # Exclude trailing user message — it will be sent as `prompt`
+        if history and history[-1]["role"] == "user":
+            history = history[:-1]
+
+        return [
+            {"role": entry["role"], "content": entry["content"]}
+            for entry in history
+        ]
 
     def _estimate_significance(self, text: str) -> float:
         """Estimate how significant input is."""
