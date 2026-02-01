@@ -646,3 +646,203 @@ def test_bridge_significance_decreases_with_repetition():
 
     # Second time should be less novel
     assert r2.significance <= r1.significance
+
+
+# ── No-Embedder (completion-only) Tests ──────────────────────────────────────
+
+
+class NoEmbedClient(LLMClient):
+    """Client that only supports completions, not embeddings (like Claude)."""
+
+    def complete(self, prompt, system_prompt="", temperature=0.7, max_tokens=1024,
+                 messages=None):
+        return f"Response to: {prompt[:50]}"
+
+    def embed(self, text):
+        raise NotImplementedError("No embeddings available")
+
+
+def test_bridge_no_embedder_creation():
+    """Bridge should initialize with a client that has no embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    assert bridge.grounding.embedder is None
+
+
+def test_bridge_no_embedder_conversation_turn():
+    """Full conversation should work without embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    response = bridge.conversation_turn("Hello!")
+    assert len(response) > 0
+    assert len(bridge._conversation_history) == 2
+
+
+def test_bridge_no_embedder_process_input():
+    """process_input should work without embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    result = bridge.process_input("Test input")
+    assert isinstance(result, ProcessResult)
+    assert result.significance > 0
+
+
+def test_bridge_no_embedder_system_prompt():
+    """System prompt should still be built without embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    prompt = bridge.build_system_prompt()
+    assert "NoEmbed" in prompt
+    assert "Coherence" in prompt
+
+
+def test_bridge_no_embedder_generation_params():
+    """Generation params should still work without embeddings."""
+    entity = create_entity("NoEmbed")
+    client = NoEmbedClient()
+    bridge = LLMBridge(entity, client)
+
+    params = bridge.get_generation_params()
+    assert 0.1 <= params.temperature <= 1.5
+    assert params.max_tokens >= 64
+
+
+def test_bridge_explicit_embedder_overrides():
+    """Explicit embedder param should override client's embed."""
+    entity = create_entity("Override")
+    client = NoEmbedClient()
+
+    # Pass a working embedder explicitly
+    mock_client = MockLLMClient()
+    bridge = LLMBridge(entity, client, embedder=mock_client.embed)
+
+    assert bridge.grounding.embedder is not None
+    emb = bridge.grounding.embedder("test")
+    assert emb.shape == (1536,)
+
+
+# ── Multi-Turn Conversation History Tests ────────────────────────────────────
+
+
+def test_mock_client_receives_messages():
+    """MockLLMClient should log messages parameter."""
+    client = MockLLMClient()
+    history = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there"},
+    ]
+    client.complete("Follow up", messages=history)
+
+    assert len(client.call_log) == 1
+    assert client.call_log[0]["messages"] == history
+    assert client.call_log[0]["prompt"] == "Follow up"
+
+
+def test_mock_client_messages_affect_response():
+    """Different conversation histories should produce different responses."""
+    client = MockLLMClient()
+    r1 = client.complete("Same prompt", messages=[
+        {"role": "user", "content": "context A"},
+        {"role": "assistant", "content": "response A"},
+    ])
+    r2 = client.complete("Same prompt", messages=[
+        {"role": "user", "content": "context B"},
+        {"role": "assistant", "content": "response B"},
+    ])
+    assert r1 != r2
+
+
+def test_mock_client_no_messages_backward_compatible():
+    """Calling complete() without messages should still work (single-turn)."""
+    client = MockLLMClient()
+    r1 = client.complete("test prompt")
+    assert isinstance(r1, str)
+    assert len(r1) > 0
+    assert client.call_log[0]["messages"] is None
+
+
+def test_bridge_passes_history_to_llm():
+    """Bridge should pass conversation history to LLM on second+ turns."""
+    bridge = create_test_bridge()
+    client = bridge.llm_client
+
+    # First turn
+    bridge.conversation_turn("Hello!")
+    # Second turn — LLM should receive history from first turn
+    bridge.conversation_turn("How are you?")
+
+    # Find the complete calls
+    complete_calls = [c for c in client.call_log if c["method"] == "complete"]
+
+    # First generate_response call: no history yet (empty messages)
+    assert complete_calls[0]["messages"] is None or complete_calls[0]["messages"] == []
+
+    # Second generate_response call: should have user + assistant from turn 1
+    second_call = complete_calls[1]
+    assert second_call["messages"] is not None
+    assert len(second_call["messages"]) >= 2
+    roles = [m["role"] for m in second_call["messages"]]
+    assert "user" in roles
+    assert "assistant" in roles
+
+
+def test_bridge_history_grows_each_turn():
+    """Message history should grow with each conversation turn."""
+    bridge = create_test_bridge()
+    client = bridge.llm_client
+
+    bridge.conversation_turn("Turn 1")
+    bridge.conversation_turn("Turn 2")
+    bridge.conversation_turn("Turn 3")
+
+    complete_calls = [c for c in client.call_log if c["method"] == "complete"]
+
+    # Turn 3 should have history of turn 1 + turn 2 (4 messages: 2 user + 2 assistant)
+    third_call = complete_calls[2]
+    assert third_call["messages"] is not None
+    assert len(third_call["messages"]) == 4
+
+
+def test_bridge_history_only_role_and_content():
+    """Messages passed to LLM should only contain role and content (no metadata)."""
+    bridge = create_test_bridge()
+    bridge.conversation_turn("Hello!")
+    bridge.conversation_turn("Follow up")
+
+    client = bridge.llm_client
+    complete_calls = [c for c in client.call_log if c["method"] == "complete"]
+    second_call = complete_calls[1]
+
+    for msg in second_call["messages"]:
+        assert set(msg.keys()) == {"role", "content"}
+
+
+def test_build_messages_empty_history():
+    """_build_messages_for_llm should return empty list for fresh bridge."""
+    bridge = create_test_bridge()
+    messages = bridge._build_messages_for_llm()
+    assert messages == []
+
+
+def test_build_messages_after_turns():
+    """_build_messages_for_llm should return all prior turns."""
+    bridge = create_test_bridge()
+    bridge.conversation_turn("Hello")
+    bridge.conversation_turn("World")
+
+    messages = bridge._build_messages_for_llm()
+    assert len(messages) == 4  # 2 user + 2 assistant
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"] == "Hello"
+    assert messages[1]["role"] == "assistant"
+    assert messages[2]["role"] == "user"
+    assert messages[2]["content"] == "World"
+    assert messages[3]["role"] == "assistant"
